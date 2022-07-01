@@ -12,24 +12,27 @@ import numpy as np
 import os
 import pandas as pd
 from pathlib import Path
+import pickle
 import re
-from typing import Any, Dict, Union
+from typing import Any, Dict, List, Optional, Union
 
 
 class PMBBDataset:
     def __init__(
         self,
-        demographics: Union[Path, str],
-        phecodes: Union[Path, str],
-        race: Union[Path, str],
-        vitals: Union[Path, str],
-        biomarkers: Union[Path, str],
+        pkl_file: Optional[Union[Path, str]] = None,
+        demographics: Union[Path, str] = None,
+        phecodes: Union[Path, str] = None,
+        race: Union[Path, str] = None,
+        vitals: Union[Path, str] = None,
+        biomarkers: Union[Path, str] = None,
         image1: Union[Path, str] = None,
         image2: Union[Path, str] = None,
         verbose: bool = False
     ):
         """
         Args:
+            pkl_file: optional cache file to load dataset from.
             demographics: file path to the demographics dataset.
             phecodes: file path to the phecodes dataset.
             race: file path to the race dataset.
@@ -39,6 +42,15 @@ class PMBBDataset:
             image2: file path to the second image dataset.
             verbose: file path to the verbose dataset.
         """
+        self.verbose = verbose
+        if pkl_file is not None:
+            if not isinstance(pkl_file, Path):
+                pkl_file = Path(pkl_file)
+            loaded_data = pickle.load(open(pkl_file, "rb"))
+            self.pmbb_ids = loaded_data["pmbb_ids"]
+            self.data = loaded_data["data"]
+            self.pkl_file = pkl_file
+            return
         self.demographics = demographics
         self.phecodes = phecodes
         self.race = race
@@ -46,15 +58,88 @@ class PMBBDataset:
         self.biomarkers = biomarkers
         self.image1 = image1
         self.image2 = image2
-        self.verbose = verbose
         self.pmbb_ids = set([])
+        self.pkl_file = None
 
         self.data = self._basic_import()
         self.data.update(self._biomarkers_import())
         self.data.update(self._image_import())
 
+    def save_dataset(self, file_path: str) -> None:
+        """
+        Saves dataset and PMBB_IDs.
+        Input:
+            file_path: string file path to save the current dataset state to.
+        Returns:
+            None. File is generated according to specified path.
+        """
+        dataset_as_dict = {}
+        dataset_as_dict["pmbb_ids"] = self.pmbb_ids
+        dataset_as_dict["data"] = self.data
+        pickle.dump(dataset_as_dict, open(file_path, "wb"))
+        if self.verbose:
+            print(f"Saved dataset to {os.path.abspath(file_path)}")
+        return None
+
     def data(self) -> Dict[str, Any]:
+        """
+        Returns the current dataset.
+        Input:
+            None.
+        Returns:
+            The current dataset.
+        """
         return self.data
+
+    def exclude_by_missing_key(self, key: str) -> None:
+        """
+        Excludes patients that are missing specified key value.
+        Input:
+            key: key to use to exclude patients.
+        Returns:
+            None. self.data is directly modified.
+        """
+        if key is None or not isinstance(key, str) or len(key) == 0:
+            if self.verbose:
+                print(f"Key {key} not found in dataset. Skipping...")
+            return
+        key = key.lower()
+        if key not in self.data.keys():
+            if self.verbose:
+                print(f"Key {key} not found in dataset. Skipping...")
+            return
+        # Get all the unique IDs from the specified dataset.
+        # We assume that all PMBB_IDs in the key dataset have an associated
+        # dataset value (ie no "nan" or "None" values).
+        pmbb_id_idx = np.where(self.data[key]["header"] == "PMBB_ID")[0]
+        assert pmbb_id_idx == 0
+        valid_pmbb_ids = set(
+            np.squeeze(self.data[key]["data"][:, pmbb_id_idx]).tolist()
+        )
+
+        self.pmbb_ids = self.pmbb_ids.intersection(valid_pmbb_ids)
+
+        for k in self.data.keys():
+            if k == key:
+                continue
+            datak = self.data[k]
+            valid_idxs = np.zeros(
+                datak["data"][:, pmbb_id_idx].shape, dtype=bool
+            )
+            before_size = np.squeeze(datak["data"][:, pmbb_id_idx]).shape[0]
+            for id in valid_pmbb_ids:
+                valid_idxs[
+                    np.where(datak["data"][:, pmbb_id_idx] == id)
+                ] = True
+            datak["data"] = datak["data"][np.squeeze(valid_idxs), ...]
+            after_size = np.squeeze(datak["data"][:, pmbb_id_idx]).shape[0]
+            self.data[k] = datak
+            if self.verbose:
+                print(f"Key {k.upper()}: {after_size} / {before_size} kept.")
+
+        if self.verbose:
+            print()
+        return
 
     def __len__(self) -> int:
         """
@@ -66,6 +151,40 @@ class PMBBDataset:
         """
         return len(self.pmbb_ids)
 
+    def get_unique_pmbb_ids(self) -> List[str]:
+        """
+        Returns a list of the unique PMBB_IDs in the dataset.
+        Input:
+            None.
+        Returns:
+            A list of the unique PMBB_IDs in the dataset.
+        """
+        return list(self.pmbb_ids)
+
+    def gen_categorical_dimensions(
+        self, data: np.ndarray, col: int = 1
+    ) -> np.ndarray:
+        """
+        Convert a string categorical dimension into multiple binary dimensions.
+        Input:
+            data: an NxD data array, where N is the number of entries and D is
+                the number of data dimensions.
+            col: the column index of the string categorical dimension in data.
+        Returns:
+            An NxC binary mask, where C is the number of unique entries in
+                the col column of data.
+        """
+        column = np.array(sorted(
+            list(set(np.squeeze(data[:, :col]).astype(str).tolist()))
+        ))
+
+        res = np.empty((data.shape[0],) + column.shape)
+        for i, el in enumerate(data[:, :col]):
+            vec = np.zeros(column.shape).astype(np.float32)
+            vec[np.where(column == el)] = 1.0
+            res[i, :] = np.squeeze(vec[np.newaxis, ...])
+        return res
+
     def _basic_import(self) -> Dict[str, Any]:
         """
         Imports demographics, race, vitals, and phecodes data.
@@ -75,6 +194,10 @@ class PMBBDataset:
             A dictionary of file stems with associated imported data.
         """
         data = {}
+        if self.pkl_file is not None:
+            if self.verbose:
+                print("Data already loaded from cache, skipping import...")
+            return data
 
         demographics = None
         num_lines = 0
@@ -205,6 +328,10 @@ class PMBBDataset:
             A dictionary of file stems with associated imported data.
         """
         data = {}
+        if self.pkl_file is not None:
+            if self.verbose:
+                print("Data already loaded from cache, skipping import...")
+            return data
 
         for fn in self.biomarkers.iterdir():
             # Skip any particular files.
@@ -311,6 +438,10 @@ class PMBBDataset:
             A dictionary of file stems with associated imported image data.
         """
         data = {}
+        if self.pkl_file is not None:
+            if self.verbose:
+                print("Data already loaded from cache, skipping import...")
+            return data
 
         if self.image1 is not None:
             if not isinstance(self.image1, Path):
@@ -366,30 +497,3 @@ class PMBBDataset:
             self.pmbb_ids.update(f.to_numpy()[:, 0].tolist())
 
         return data
-
-
-if __name__ == "__main__":
-    PREFIX = os.path.join(
-        os.path.abspath(os.path.join(__file__, os.pardir)),
-        "PMBB-Release-2020-2.2_"
-    )
-    BIOMARKERS = os.path.join(
-        os.path.abspath(os.path.join(__file__, os.pardir)),
-        "biomarker_data"
-    )
-    IMAGE_DATA = os.path.join(
-        os.path.abspath(os.path.join(__file__, os.pardir)),
-        "image_data"
-    )
-    dataset = PMBBDataset(
-        demographics=Path(PREFIX + "phenotype_demographics-ct-studies.txt"),
-        phecodes=Path(PREFIX + "phenotype_PheCode-matrix-ct-studies.txt"),
-        race=Path(PREFIX + "phenotype_race_eth-ct-studies.txt"),
-        vitals=Path(PREFIX + "phenotype_vitals-BMI-ct-studies.txt"),
-        biomarkers=Path(BIOMARKERS),
-        image1=Path(
-            os.path.join(IMAGE_DATA, "visceral_merge_log_run_11_1_20.csv")
-        ),
-        image2=Path(os.path.join(IMAGE_DATA, "steatosis_run_2_merge.csv")),
-        verbose=True
-    )
