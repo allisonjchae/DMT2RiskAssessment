@@ -7,7 +7,8 @@ Author(s):
 
 Licensed under the MIT License.
 """
-from datetime import datetime
+from collections import defaultdict
+from datetime import datetime, date
 import numpy as np
 import os
 import pandas as pd
@@ -46,20 +47,35 @@ class PMBBDataset:
         if pkl_file is not None:
             if not isinstance(pkl_file, Path):
                 pkl_file = Path(pkl_file)
-            loaded_data = pickle.load(open(pkl_file, "rb"))
-            self.pmbb_ids = loaded_data["pmbb_ids"]
-            self.data = loaded_data["data"]
-            self.pkl_file = pkl_file
-            return
+            if pkl_file.exists():
+                loaded_data = pickle.load(open(pkl_file, "rb"))
+                self.pmbb_ids = loaded_data["pmbb_ids"]
+                self.data = loaded_data["data"]
+                self.a1c = loaded_data["a1c"]
+                self.t2dm = loaded_data["t2dm"]
+                self.pkl_file = pkl_file
+                if self.verbose:
+                    print(
+                        f"Imported from cache {os.path.abspath(pkl_file)}"
+                    )
+                return
+            elif self.verbose:
+                print(
+                    f"Cache {pkl_file} not found, continuing with import."
+                )
         self.demographics = demographics
         self.phecodes = phecodes
         self.race = race
         self.vitals = vitals
         self.biomarkers = biomarkers
+        if not isinstance(self.biomarkers, Path):
+            self.biomarkers = Path(self.biomarkers)
         self.image1 = image1
         self.image2 = image2
         self.pmbb_ids = set([])
         self.pkl_file = None
+        self.t2dm = {}
+        self.a1c = {}
 
         self.data = self._basic_import()
         self.data.update(self._biomarkers_import())
@@ -76,6 +92,8 @@ class PMBBDataset:
         dataset_as_dict = {}
         dataset_as_dict["pmbb_ids"] = self.pmbb_ids
         dataset_as_dict["data"] = self.data
+        dataset_as_dict["t2dm"] = self.t2dm
+        dataset_as_dict["a1c"] = self.a1c
         pickle.dump(dataset_as_dict, open(file_path, "wb"))
         if self.verbose:
             print(f"Saved dataset to {os.path.abspath(file_path)}")
@@ -91,6 +109,73 @@ class PMBBDataset:
         """
         return self.data
 
+    def get_range_timepoints(self, key: str) -> Dict[str, List[datetime]]:
+        """
+        Returns a range of the time for which specified data was collected
+        for each patient in the specified dataset.
+        Input:
+            key: clinical data to get the timepoints for.
+        Returns:
+            dictionary keys: PMBB IDs.
+            dictionary values: [earliest time that data was collected,
+                most recent time that data was collected].
+        """
+        timepoints = {}
+        if key == "a1c":
+            dataset = self.a1c
+        elif key == "t2dm":
+            dataset = self.t2dm
+        else:
+            dataset = self.data[key]
+        dates = dataset["header"].tolist().index("ORDER_DATE_SHIFT")
+        ids = dataset["header"].tolist().index("PMBB_ID")
+        for r in range(dataset["data"].shape[0]):
+            curr_range = timepoints.get(
+                dataset["data"][r, ids].upper(), [date.max, date.min]
+            )
+            d = datetime.strptime(dataset["data"][r, dates], "%Y-%m-%d")
+            if d < datetime.combine(curr_range[0], datetime.min.time()):
+                curr_range[0] = d
+            if d > datetime.combine(curr_range[-1], datetime.min.time()):
+                curr_range[-1] = d
+            timepoints[dataset["data"][r, ids].upper()] = curr_range
+
+        return timepoints
+
+    def exclude_by_data_availability(
+        self,
+        timepoints: Dict[str, List[datetime]],
+        threshmin: Union[float, int] = 1
+    ) -> None:
+        """
+        Excludes patients that are missing too many types of data in
+        specified time frame.
+        Input:
+            timepoints: a dictionary of PMBB IDs mapping to ranges of
+                datetimes where data was collected.
+            threshmin: threshold for number of data types the patient
+                must have in order to remain in the dataset. If
+                threshmin < 1, threshmin is treated as a fraction of
+                the total number of available datatypes.
+        Returns:
+            None. self.data is directly modified.
+        """
+        if threshmin < 1.0:
+            threshmin = int(threshmin * len(self.data.keys()))
+        else:
+            threshmin = int(threshmin)
+        threshmin = max(0, min(threshmin, len(self.data.keys())))
+        counts = defaultdict(int)
+        for key in self.data.keys():
+            ids = self.data[key]["header"].tolist().index("PMBB_ID")
+            for el in set(np.squeeze(self.data[key]["data"][:, ids]).tolist()):
+                # TODO: Still need to restrict by dates.
+                counts[el] += 1
+        valid_pmbb_ids = []
+        for _id in counts.keys():
+            if counts[_id] > threshmin:
+                valid_pmbb_ids.append(_id)
+
     def exclude_by_missing_key(self, key: str) -> None:
         """
         Excludes patients that are missing specified key value.
@@ -101,20 +186,30 @@ class PMBBDataset:
         """
         if key is None or not isinstance(key, str) or len(key) == 0:
             if self.verbose:
-                print(f"Key {key} not found in dataset. Skipping...")
+                print(
+                    f"Key {key} not found in dataset. Skipping...", flush=True
+                )
             return
         key = key.lower()
-        if key not in self.data.keys():
+        if key not in self.data.keys() and key not in ["a1c", "t2dm"]:
             if self.verbose:
-                print(f"Key {key} not found in dataset. Skipping...")
+                print(
+                    f"Key {key} not found in dataset. Skipping...", flush=True
+                )
             return
         # Get all the unique IDs from the specified dataset.
         # We assume that all PMBB_IDs in the key dataset have an associated
         # dataset value (ie no "nan" or "None" values).
-        pmbb_id_idx = np.where(self.data[key]["header"] == "PMBB_ID")[0]
+        if key == "a1c":
+            ref_dataset = self.a1c
+        elif key == "t2dm":
+            ref_dataset = self.t2dm
+        else:
+            ref_dataset = self.data[key]
+        pmbb_id_idx = np.where(ref_dataset["header"] == "PMBB_ID")[0]
         assert pmbb_id_idx == 0
         valid_pmbb_ids = set(
-            np.squeeze(self.data[key]["data"][:, pmbb_id_idx]).tolist()
+            np.squeeze(ref_dataset["data"][:, pmbb_id_idx]).tolist()
         )
 
         self.pmbb_ids = self.pmbb_ids.intersection(valid_pmbb_ids)
@@ -127,15 +222,50 @@ class PMBBDataset:
                 datak["data"][:, pmbb_id_idx].shape, dtype=bool
             )
             before_size = np.squeeze(datak["data"][:, pmbb_id_idx]).shape[0]
-            for id in valid_pmbb_ids:
+            for _id in valid_pmbb_ids:
                 valid_idxs[
-                    np.where(datak["data"][:, pmbb_id_idx] == id)
+                    np.where(datak["data"][:, pmbb_id_idx] == _id)
                 ] = True
             datak["data"] = datak["data"][np.squeeze(valid_idxs), ...]
             after_size = np.squeeze(datak["data"][:, pmbb_id_idx]).shape[0]
             self.data[k] = datak
             if self.verbose:
-                print(f"Key {k.upper()}: {after_size} / {before_size} kept.")
+                print(
+                    f"Key {k.upper()}: {after_size} / {before_size} kept.",
+                    flush=True
+                )
+        if key != "a1c":
+            valid_idxs = np.zeros(
+                self.a1c["data"][:, pmbb_id_idx].shape, dtype=bool
+            )
+            before_size = np.squeeze(self.a1c["data"][:, pmbb_id_idx]).shape[0]
+            for _id in valid_pmbb_ids:
+                valid_idxs[
+                    np.where(self.a1c["data"][:, pmbb_id_idx] == _id)
+                ] = True
+            self.a1c["data"] = self.a1c["data"][np.squeeze(valid_idxs), ...]
+            after_size = np.squeeze(self.a1c["data"][:, pmbb_id_idx]).shape[0]
+            if self.verbose:
+                print(
+                    f"Key a1c: {after_size} / {before_size} kept.", flush=True
+                )
+        if key != "t2dm":
+            valid_idxs = np.zeros(
+                self.t2dm["data"][:, pmbb_id_idx].shape, dtype=bool
+            )
+            before_size = np.squeeze(
+                self.t2dm["data"][:, pmbb_id_idx]
+            ).shape[0]
+            for _id in valid_pmbb_ids:
+                valid_idxs[
+                    np.where(self.t2dm["data"][:, pmbb_id_idx] == _id)
+                ] = True
+            self.t2dm["data"] = self.t2dm["data"][np.squeeze(valid_idxs), ...]
+            after_size = np.squeeze(self.t2dm["data"][:, pmbb_id_idx]).shape[0]
+            if self.verbose:
+                print(
+                    f"Key a1c: {after_size} / {before_size} kept.", flush=True
+                )
 
         if self.verbose:
             print()
@@ -337,6 +467,15 @@ class PMBBDataset:
             # Skip any particular files.
             if "fasting_glucose" in fn.stem.lower():
                 continue
+            # Skip CRP since PMBB IDs are not available in CRP dataset.
+            elif "crp" in fn.stem.lower() or "urobili" in fn.stem.lower():
+                continue
+            # Skip Urobili since PMBB IDs are not available in Urobili dataset.
+            elif "urobili" in fn.stem.lower():
+                continue
+            # Skip ALB since PMBB IDs are not available in ALB dataset.
+            elif "alb" in fn.stem.lower():
+                continue
             elif not fn.as_posix().lower().endswith(".csv"):
                 continue
 
@@ -347,6 +486,7 @@ class PMBBDataset:
                     print("Skipping " + fn.stem, flush=True)
                 continue
             f = pd.read_csv(fn)
+            f.dropna(inplace=True)
             if "bmi" in fn.stem.lower():
                 f.drop(["PATIENT_CLASS"], axis=1, inplace=True)
             elif "dbp" in fn.stem.lower():
@@ -365,9 +505,16 @@ class PMBBDataset:
                     "PATIENT_CLASS", "ORDER_NAME", "ABNORMAL"
                 ], axis=1, inplace=True)
             elif "t2dm_status" in fn.stem.lower():
-                # Drop T2DM status data.
+                f.drop(["PACKET_UUID"], axis=1, inplace=True)
+                f.replace("CONTROL", 0, inplace=True)
+                f.replace("INSUFFICENT_EVIDENCE", 0, inplace=True)
+                f.replace("CASE", 1, inplace=True)
+                self.t2dm = {
+                    "header": np.array(list(f.columns)),
+                    "data": f.to_numpy()
+                }
                 if self.verbose:
-                    print("Skipping " + fn.stem, flush=True)
+                    print("Found ground truth T2DM statuses.")
                 continue
             elif "antihypertensive" in fn.stem.lower():
                 f.drop([
@@ -409,6 +556,8 @@ class PMBBDataset:
                     "RESULT_DATE_SHIFT",
                     "ABNORMAL",
                 ], axis=1, inplace=True)
+                if "PATIENT_CLASS" in f.columns:
+                    f.drop(["PATIENT_CLASS"], axis=1, inplace=True)
             if self.verbose:
                 print("Imported " + fn.stem, flush=True)
 
@@ -420,6 +569,14 @@ class PMBBDataset:
                     "header": np.array(list(f.columns))[:2],
                     "data": f.to_numpy()[:, :2]
                 }
+            elif "a1c" in fn.stem.lower():
+                self.a1c = {
+                    "header": np.array(list(f.columns)),
+                    "data": f.to_numpy()
+                }
+                if self.verbose:
+                    print("Found ground truth A1C measurements.")
+                continue
             else:
                 data[key] = {
                     "header": np.array(list(f.columns)),
