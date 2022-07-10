@@ -7,14 +7,15 @@ Author(s):
 
 Licensed under the MIT License.
 """
-from datetime import datetime
+from collections import defaultdict
+from datetime import datetime, date
 import numpy as np
 import os
 import pandas as pd
 from pathlib import Path
 import pickle
 import re
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Set, Union
 
 
 class PMBBDataset:
@@ -28,6 +29,7 @@ class PMBBDataset:
         biomarkers: Union[Path, str] = None,
         image1: Union[Path, str] = None,
         image2: Union[Path, str] = None,
+        restrict_to_image_data: bool = True,
         verbose: bool = False
     ):
         """
@@ -40,6 +42,7 @@ class PMBBDataset:
             biomarkers: file path to the biomarkers dataset.
             image1: file path to the first image dataset.
             image2: file path to the second image dataset.
+            restrict_to_image_data: whether to only import image data.
             verbose: file path to the verbose dataset.
         """
         self.verbose = verbose
@@ -67,7 +70,9 @@ class PMBBDataset:
         self.race = race
         self.vitals = vitals
         self.biomarkers = biomarkers
-        if not isinstance(self.biomarkers, Path):
+        if self.biomarkers is not None and not isinstance(
+            self.biomarkers, Path
+        ):
             self.biomarkers = Path(self.biomarkers)
         self.image1 = image1
         self.image2 = image2
@@ -76,6 +81,11 @@ class PMBBDataset:
         self.t2dm = {}
         self.a1c = {}
 
+        if restrict_to_image_data:
+            self.data = self._image_import()
+            self._biomarkers_import(import_key="a1c")
+            assert len(self.a1c)
+            return
         self.data = self._basic_import()
         self.data.update(self._biomarkers_import())
         self.data.update(self._image_import())
@@ -98,15 +108,167 @@ class PMBBDataset:
             print(f"Saved dataset to {os.path.abspath(file_path)}")
         return None
 
-    def data(self) -> Dict[str, Any]:
+    def get_range_timepoints(self, key: str) -> Dict[str, List[datetime]]:
         """
-        Returns the current dataset.
+        Returns a range of the time for which specified data was collected
+        for each patient in the specified dataset.
         Input:
-            None.
+            key: clinical data to get the timepoints for.
         Returns:
-            The current dataset.
+            dictionary keys: PMBB IDs.
+            dictionary values: [earliest time that data was collected,
+                most recent time that data was collected].
         """
-        return self.data
+        timepoints = {}
+        if key == "a1c":
+            dataset = self.a1c
+        elif key == "t2dm":
+            dataset = self.t2dm
+        else:
+            dataset = self.data[key]
+        dates = dataset["header"].tolist().index("ORDER_DATE_SHIFT")
+        ids = dataset["header"].tolist().index("PMBB_ID")
+        for r in range(dataset["data"].shape[0]):
+            curr_range = timepoints.get(
+                dataset["data"][r, ids].upper(), [date.max, date.min]
+            )
+            d = datetime.strptime(dataset["data"][r, dates], "%Y-%m-%d")
+            if d < datetime.combine(curr_range[0], datetime.min.time()):
+                curr_range[0] = d
+            if d > datetime.combine(curr_range[-1], datetime.min.time()):
+                curr_range[-1] = d
+            timepoints[dataset["data"][r, ids].upper()] = curr_range
+
+        return timepoints
+
+    def exclude_by_data_availability(
+        self,
+        timepoints: Dict[str, List[datetime]],
+        threshmin: Union[float, int] = 1
+    ) -> None:
+        """
+        Excludes patients that are missing too many types of data in
+        specified time frame.
+        Input:
+            timepoints: a dictionary of PMBB IDs mapping to ranges of
+                datetimes where data was collected.
+            threshmin: threshold for number of data types the patient
+                must have in order to remain in the dataset. If
+                threshmin < 1, threshmin is treated as a fraction of
+                the total number of available datatypes.
+        Returns:
+            None. self.data is directly modified.
+        """
+        if threshmin < 1.0:
+            threshmin = int(threshmin * len(self.data.keys()))
+        else:
+            threshmin = int(threshmin)
+        threshmin = max(0, min(threshmin, len(self.data.keys())))
+        counts = defaultdict(int)
+        for key in self.data.keys():
+            ids = self.data[key]["header"].tolist().index("PMBB_ID")
+            if "ORDER_DATE_SHIFT" in self.data[key]["header"].tolist():
+                date_idx = self.data[key]["header"].tolist().index(
+                    "ORDER_DATE_SHIFT"
+                )
+            elif "ENC_DATE_SHIFT" in self.data[key]["header"].tolist():
+                date_idx = self.data[key]["header"].tolist().index(
+                    "ENC_DATE_SHIFT"
+                )
+            else:
+                date_idx = -1
+            for i, el in enumerate(
+                set(np.squeeze(self.data[key]["data"][:, ids]).tolist())
+            ):
+                if date_idx == -1:
+                    counts[el] += 1
+                    continue
+                data_date = datetime.strptime(
+                    self.data[key]["data"][i, date_idx],
+                    "%Y-%m-%d"
+                )
+                l_date, r_date = timepoints[el]
+                if l_date.year <= data_date.year <= r_date.year:
+                    counts[el] += 1
+        valid_pmbb_ids = []
+        for _id in counts.keys():
+            if counts[_id] > threshmin:
+                valid_pmbb_ids.append(_id)
+        self.restrict_pmbb_ids(set(valid_pmbb_ids))
+
+    def restrict_pmbb_ids(
+        self, valid_pmbb_ids: Set[str], key: Optional[str] = None
+    ) -> None:
+        """
+        Excludes PMBB IDs and data in dataset to just those specified in
+        valid_pmbb_ids.
+        Input:
+            valid_pmbb_ids: a collection of valid PMBB IDs to restrict our
+                dataset to.
+            key: optional original key used for dataset exclusion criteria.
+        Returns:
+            None. Dataset is automatically updated.
+        """
+        self.pmbb_ids = self.pmbb_ids.intersection(valid_pmbb_ids)
+        pmbb_id_idx = 0
+
+        for k in self.data.keys():
+            if key is not None and k == key:
+                continue
+            datak = self.data[k]
+            valid_idxs = np.zeros(
+                datak["data"][:, pmbb_id_idx].shape, dtype=bool
+            )
+            before_size = np.squeeze(datak["data"][:, pmbb_id_idx]).shape[0]
+            for _id in valid_pmbb_ids:
+                valid_idxs[
+                    np.where(datak["data"][:, pmbb_id_idx] == _id)
+                ] = True
+            datak["data"] = datak["data"][np.squeeze(valid_idxs), ...]
+            after_size = np.squeeze(datak["data"][:, pmbb_id_idx]).shape[0]
+            self.data[k] = datak
+            if self.verbose:
+                print(
+                    f"Key {k.upper()}: {after_size} / {before_size} kept.",
+                    flush=True
+                )
+        if (key is not None and key != "a1c" and
+                self.a1c.get("data", None) is not None):
+            valid_idxs = np.zeros(
+                self.a1c["data"][:, pmbb_id_idx].shape, dtype=bool
+            )
+            before_size = np.squeeze(self.a1c["data"][:, pmbb_id_idx]).shape[0]
+            for _id in valid_pmbb_ids:
+                valid_idxs[
+                    np.where(self.a1c["data"][:, pmbb_id_idx] == _id)
+                ] = True
+            self.a1c["data"] = self.a1c["data"][np.squeeze(valid_idxs), ...]
+            after_size = np.squeeze(self.a1c["data"][:, pmbb_id_idx]).shape[0]
+            if self.verbose:
+                print(
+                    f"Key a1c: {after_size} / {before_size} kept.", flush=True
+                )
+        if (key is not None and key != "t2dm" and
+                self.t2dm.get("data", None) is not None):
+            valid_idxs = np.zeros(
+                self.t2dm["data"][:, pmbb_id_idx].shape, dtype=bool
+            )
+            before_size = np.squeeze(
+                self.t2dm["data"][:, pmbb_id_idx]
+            ).shape[0]
+            for _id in valid_pmbb_ids:
+                valid_idxs[
+                    np.where(self.t2dm["data"][:, pmbb_id_idx] == _id)
+                ] = True
+            self.t2dm["data"] = self.t2dm["data"][np.squeeze(valid_idxs), ...]
+            after_size = np.squeeze(self.t2dm["data"][:, pmbb_id_idx]).shape[0]
+            if self.verbose:
+                print(
+                    f"Key t2dm: {after_size} / {before_size} kept.", flush=True
+                )
+
+        if self.verbose:
+            print()
 
     def exclude_by_missing_key(self, key: str) -> None:
         """
@@ -118,12 +280,16 @@ class PMBBDataset:
         """
         if key is None or not isinstance(key, str) or len(key) == 0:
             if self.verbose:
-                print(f"Key {key} not found in dataset. Skipping...")
+                print(
+                    f"Key {key} not found in dataset. Skipping...", flush=True
+                )
             return
         key = key.lower()
         if key not in self.data.keys() and key not in ["a1c", "t2dm"]:
             if self.verbose:
-                print(f"Key {key} not found in dataset. Skipping...")
+                print(
+                    f"Key {key} not found in dataset. Skipping...", flush=True
+                )
             return
         # Get all the unique IDs from the specified dataset.
         # We assume that all PMBB_IDs in the key dataset have an associated
@@ -140,57 +306,7 @@ class PMBBDataset:
             np.squeeze(ref_dataset["data"][:, pmbb_id_idx]).tolist()
         )
 
-        self.pmbb_ids = self.pmbb_ids.intersection(valid_pmbb_ids)
-
-        for k in self.data.keys():
-            if k == key:
-                continue
-            datak = self.data[k]
-            valid_idxs = np.zeros(
-                datak["data"][:, pmbb_id_idx].shape, dtype=bool
-            )
-            before_size = np.squeeze(datak["data"][:, pmbb_id_idx]).shape[0]
-            for _id in valid_pmbb_ids:
-                valid_idxs[
-                    np.where(datak["data"][:, pmbb_id_idx] == _id)
-                ] = True
-            datak["data"] = datak["data"][np.squeeze(valid_idxs), ...]
-            after_size = np.squeeze(datak["data"][:, pmbb_id_idx]).shape[0]
-            self.data[k] = datak
-            if self.verbose:
-                print(f"Key {k.upper()}: {after_size} / {before_size} kept.")
-        if key != "a1c":
-            valid_idxs = np.zeros(
-                self.a1c["data"][:, pmbb_id_idx].shape, dtype=bool
-            )
-            before_size = np.squeeze(self.a1c["data"][:, pmbb_id_idx]).shape[0]
-            for _id in valid_pmbb_ids:
-                valid_idxs[
-                    np.where(self.a1c["data"][:, pmbb_id_idx] == _id)
-                ] = True
-            self.a1c["data"] = self.a1c["data"][np.squeeze(valid_idxs), ...]
-            after_size = np.squeeze(self.a1c["data"][:, pmbb_id_idx]).shape[0]
-            if self.verbose:
-                print(f"Key a1c: {after_size} / {before_size} kept.")
-        if key != "t2dm":
-            valid_idxs = np.zeros(
-                self.t2dm["data"][:, pmbb_id_idx].shape, dtype=bool
-            )
-            before_size = np.squeeze(
-                self.t2dm["data"][:, pmbb_id_idx]
-            ).shape[0]
-            for _id in valid_pmbb_ids:
-                valid_idxs[
-                    np.where(self.t2dm["data"][:, pmbb_id_idx] == _id)
-                ] = True
-            self.t2dm["data"] = self.t2dm["data"][np.squeeze(valid_idxs), ...]
-            after_size = np.squeeze(self.t2dm["data"][:, pmbb_id_idx]).shape[0]
-            if self.verbose:
-                print(f"Key a1c: {after_size} / {before_size} kept.")
-
-        if self.verbose:
-            print()
-        return
+        self.restrict_pmbb_ids(valid_pmbb_ids, key=key)
 
     def __len__(self) -> int:
         """
@@ -211,6 +327,58 @@ class PMBBDataset:
             A list of the unique PMBB_IDs in the dataset.
         """
         return list(self.pmbb_ids)
+
+    def X(self) -> np.ndarray:
+        print(sorted(self.data.keys()))
+        data_classes = sorted(self.data.keys())
+        for i in range(len(self.get_unique_pmbb_ids())):
+            data_for_id = []
+            _id = self.get_unique_pmbb_ids()[i]
+            for j in range(len(data_classes)):
+                d = self.data[data_classes[j]]
+                numeric = "RESULT_VALUE_NUM" in d["header"]
+                numeric = numeric and "VALUE_LOWER_LIMIT_NUM" in d["header"]
+                numeric = numeric and "VALUE_UPPER_LIMIT_NUM" in d["header"]
+                if numeric:
+                    # Assume a normal distribution.
+                    val_idx = np.where(
+                        d["header"] == "RESULT_VALUE_NUM"
+                    )[0][0]
+                    lower_idx = np.where(
+                        d["header"] == "VALUE_LOWER_LIMIT_NUM"
+                    )[0][0]
+                    upper_idx = np.where(
+                        d["header"] == "VALUE_UPPER_LIMIT_NUM"
+                    )[0][0]
+                    pmbb_idx = np.where(
+                        d["header"] == "PMBB_ID"
+                    )[0][0]
+                    data_rows = np.where(d["data"][:, pmbb_idx] == _id)[0]
+                    if len(data_rows) == 0:
+                        data_for_id.append(None)
+                    else:
+                        sum_z_val = 0
+                        for i in range(len(data_rows)):
+                            # Row with the relevant data.
+                            row = np.squeeze(d["data"][data_rows[i]])
+                            mean = row[lower_idx] + (
+                                (row[upper_idx] - row[lower_idx]) / 2
+                            )
+                            std = (mean - row[lower_idx]) / 2
+                            if std != 0:
+                                sum_z_val += (row[val_idx] - mean) / std
+                            else:
+                                # This case should only be reached if these
+                                # are percentages.
+                                sum_z_val += row[val_idx] / 100
+                        data_for_id.append(sum_z_val / len(data_rows))
+
+                else:
+                    if i == 0:
+                        print(
+                            data_classes[j],
+                            self.data[data_classes[j]]["header"]
+                        )
 
     def gen_categorical_dimensions(
         self, data: np.ndarray, col: int = 1
@@ -370,11 +538,13 @@ class PMBBDataset:
             print()
         return data
 
-    def _biomarkers_import(self) -> Dict[str, Any]:
+    def _biomarkers_import(
+        self, import_key: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         Imports biomarker data.
         Input:
-            None.
+            import_key: if specified, only this data type is imported.
         Returns:
             A dictionary of file stems with associated imported data.
         """
@@ -386,6 +556,8 @@ class PMBBDataset:
 
         for fn in self.biomarkers.iterdir():
             # Skip any particular files.
+            if import_key is not None and import_key not in fn.stem.lower():
+                continue
             if "fasting_glucose" in fn.stem.lower():
                 continue
             # Skip CRP since PMBB IDs are not available in CRP dataset.
@@ -525,6 +697,7 @@ class PMBBDataset:
             if not isinstance(self.image1, Path):
                 self.image1 = Path(self.image1)
             f = pd.read_csv(self.image1)
+            f.dropna(inplace=True)
             f.drop([
                 "PMBB_SERIES_UID",
                 "THICKNESS",
@@ -551,6 +724,7 @@ class PMBBDataset:
             if not isinstance(self.image2, Path):
                 self.image2 = Path(self.image2)
             f = pd.read_csv(self.image2)
+            f.dropna(inplace=True)
             f.drop([
                 "PMBB_SERIES_ID",
                 "THICKNESS",
@@ -575,3 +749,4 @@ class PMBBDataset:
             self.pmbb_ids.update(f.to_numpy()[:, 0].tolist())
 
         return data
+
