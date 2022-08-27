@@ -23,14 +23,25 @@ from models.mlp import MLP
 
 def main():
     args = build_args()
-    A1C_THRESHMIN = 6.4
+    A1C_THRESHMIN = 6.5
 
     dataset = ImageDataset(
         biomarkers_datapath=args.biomarkers_datapath,
         steatosis_datapath=args.steatosis_datapath,
         visceral_fat_datapath=args.visceral_fat_datapath,
+        biomarkers_keys=args.biomarkers_keys,
         verbose=args.verbose
     )
+    # Map PMBB Accession keys to date keys.
+    mmap = dataset.import_study_dates(
+        fn="data/sectra_syngo_merge_3-1-19_WITHCPT.csv",
+        mmap="data/accession_to_pmbb.csv",
+        modality="CT ABDOMEN",
+        deidentify=True
+    )
+    dataset.pmbb_accessions_to_dates(mmap)
+    dataset_map = dataset.dataset.generate_dataset_map(dataset.valid_pmbb_ids)
+
     if len(args.data_split) != 3 or sum(args.data_split) != 100:
         raise ValueError(
             f"Invalid data split {args.data_split} for (train, val, test)."
@@ -60,7 +71,7 @@ def main():
         )
         train_dataset, val_dataset, test_dataset = split
     train_dataloader = torch.utils.data.DataLoader(
-        dataset=train_dataset, num_workers=args.num_workers
+        dataset=train_dataset, num_workers=args.num_workers, shuffle=True
     )
     val_dataloader = None
     if val_dataset is not None:
@@ -101,12 +112,17 @@ def main():
         training_features, training_outputs = None, None
         for i in range(len(train_dataset)):
             item = train_dataset[i]
-            x = np.array([[
+            x = [
                 item.subq_metric_area_mean,
                 item.visceral_metric_area_mean,
                 item.liver_mean_hu,
                 item.spleen_mean_hu
-            ]])
+            ]
+            if args.no_image_derived:
+                x = []
+            for f in item.biomarkers:
+                x.append(f)
+            x = np.array([x])
             y = np.array([[item.a1c_gt > A1C_THRESHMIN]])
             if training_features is None:
                 training_features = x
@@ -122,12 +138,17 @@ def main():
                 )
         for i in range(len(val_dataset)):
             item = val_dataset[i]
-            x = np.array([[
+            x = [
                 item.subq_metric_area_mean,
                 item.visceral_metric_area_mean,
                 item.liver_mean_hu,
                 item.spleen_mean_hu
-            ]])
+            ]
+            if args.no_image_derived:
+                x = []
+            for f in item.biomarkers:
+                x.append(f)
+            x = np.array([x])
             y = np.array([[item.a1c_gt > A1C_THRESHMIN]])
             training_features = np.concatenate(
                 (training_features, x), axis=0
@@ -139,19 +160,24 @@ def main():
     if args.model.lower() == "xgboost":
         xgbc.fit(training_features, training_outputs.astype(int))
     elif args.model.lower() == "mlr":
-        mlr= mlr.fit(training_features, training_outputs)
+        mlr = mlr.fit(training_features, training_outputs)
 
     if args.model.lower() in ["xgboost", "mlr"]:
         # Construct testing matrices.
         testing_features, testing_outputs = None, None
         for i in range(len(test_dataset)):
             item = test_dataset[i]
-            x = np.array([[
+            x = [
                 item.subq_metric_area_mean,
                 item.visceral_metric_area_mean,
                 item.liver_mean_hu,
                 item.spleen_mean_hu
-            ]])
+            ]
+            if args.no_image_derived:
+                x = []
+            for f in item.biomarkers:
+                x.append(f)
+            x = np.array([x])
             y = np.array([[item.a1c_gt > A1C_THRESHMIN]])
             if testing_features is None:
                 testing_features = x
@@ -182,8 +208,14 @@ def main():
         )
     elif args.model.lower() == "mlp":
         loss_fn = torch.nn.MSELoss()
+        # Remove the PMBB ID and the ground truth A1C values.
+        num_features = len(train_dataset[0]) - 3 + len(args.biomarkers_keys)
+        if args.no_image_derived:
+            num_features -= 4
+        for k in args.biomarkers_keys:
+            num_features -= "a1c" == k.lower()
         model = MLP(
-            in_chans=4,
+            in_chans=num_features,
             out_chans=1,
             chans=args.chans,
             num_layers=args.num_layers,
@@ -204,12 +236,17 @@ def main():
             running_loss = 0.0
             for i, data in enumerate(train_dataloader, 0):
                 optimizer.zero_grad()
-                features = torch.Tensor([
+                features = [
                     data.subq_metric_area_mean,
                     data.visceral_metric_area_mean,
                     data.liver_mean_hu,
                     data.spleen_mean_hu
-                ])
+                ]
+                if args.no_image_derived:
+                    features = []
+                for f in data.biomarkers:
+                    features.append(f)
+                features = torch.Tensor(features)
                 outputs = model(features)
                 loss = loss_fn(outputs, torch.Tensor([data.a1c_gt]))
                 loss.backward()
@@ -230,12 +267,17 @@ def main():
                     model.eval()
                     val_loss = 0.0
                     for i, data in enumerate(val_dataloader, 0):
-                        features = torch.Tensor([
+                        features = [
                             data.subq_metric_area_mean,
                             data.visceral_metric_area_mean,
                             data.liver_mean_hu,
                             data.spleen_mean_hu
-                        ])
+                        ]
+                        if args.no_image_derived:
+                            features = []
+                        for f in data.biomarkers:
+                            features.append(f)
+                        features = torch.Tensor(features)
                         outputs = model(features)
                         loss = loss_fn(outputs, torch.Tensor([data.a1c_gt]))
                         val_loss += loss.item()
@@ -252,12 +294,17 @@ def main():
             test_loss = 0.0
             test_gt, test_predictions = [], []
             for i, data in enumerate(test_dataloader, 0):
-                features = torch.Tensor([
+                features = [
                     data.subq_metric_area_mean,
                     data.visceral_metric_area_mean,
                     data.liver_mean_hu,
                     data.spleen_mean_hu
-                ])
+                ]
+                if args.no_image_derived:
+                    features = []
+                for f in data.biomarkers:
+                    features.append(f)
+                features = torch.Tensor(features)
                 output = model(features)
                 loss = loss_fn(output, torch.Tensor([data.a1c_gt]))
                 test_gt.append(data.a1c_gt > A1C_THRESHMIN)

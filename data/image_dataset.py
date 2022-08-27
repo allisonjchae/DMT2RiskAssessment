@@ -10,8 +10,9 @@ Licensed under the MIT License.
 import datetime
 import numpy as np
 from pathlib import Path
+import pandas as pd
 from torch.utils.data import Dataset
-from typing import NamedTuple, Union
+from typing import Any, Dict, NamedTuple, Optional, Sequence, Union
 
 from data.dataset import PMBBDataset
 
@@ -22,6 +23,7 @@ class ImageSample(NamedTuple):
     visceral_metric_area_mean: float
     liver_mean_hu: float
     spleen_mean_hu: float
+    biomarkers: Sequence[float]
     a1c_gt: float
 
 
@@ -31,6 +33,7 @@ class ImageDataset(Dataset):
         steatosis_datapath: Union[Path, str],
         visceral_fat_datapath: Union[Path, str],
         biomarkers_datapath: Union[Path, str],
+        biomarkers_keys: Sequence[str] = [],
         verbose: bool = False
     ):
         super().__init__()
@@ -42,12 +45,16 @@ class ImageDataset(Dataset):
             biomarkers=biomarkers_datapath,
             image1=visceral_fat_datapath,
             image2=steatosis_datapath,
-            restrict_to_image_data=True,
+            biomarkers_keys=biomarkers_keys,
             verbose=verbose
         )
-        self.dataset.exclude_by_missing_key("a1c")
+        # self.dataset.exclude_by_missing_key("a1c")
+        # Convert ICD-9 codes to T2DM status.
+        self.dataset.extract_t2dm_from_icd9()
+
         valid_pmbb_ids = set([])
-        for _id in self.dataset.pmbb_ids:
+        from tqdm import tqdm
+        for _id in tqdm(self.dataset.pmbb_ids):
             data_count = np.where(
                 np.squeeze(
                     self.dataset.data[self.visc_key]["data"][:, 0]
@@ -60,7 +67,8 @@ class ImageDataset(Dataset):
             )[0].shape
             if data_count:
                 valid_pmbb_ids.add(_id)
-        self.dataset.restrict_pmbb_ids(valid_pmbb_ids)
+        # self.dataset.restrict_pmbb_ids(valid_pmbb_ids)
+        self.valid_pmbb_ids = valid_pmbb_ids
         if self.verbose:
             print(f"PMBB ID Count: {len(self.dataset)}", flush=True)
             visc_count = self.dataset.data[self.visc_key]["data"].shape[0]
@@ -113,7 +121,6 @@ class ImageDataset(Dataset):
         for i, date in enumerate(
             np.squeeze(self.dataset.a1c["data"][:, a1c_dates_idx])
         ):
-            date = datetime.datetime.strptime(date, "%Y-%m-%d")
             v_idxs = np.where(
                 np.squeeze(
                     self.dataset.data[self.visc_key]["data"][:, v_pmbb_id_idx]
@@ -125,6 +132,124 @@ class ImageDataset(Dataset):
                 ) == self.dataset.a1c["data"][i, a1c_pmbb_id_idx]
             )
             # TODO
+
+    def map_keys(
+        self,
+        header: Union[pd.Index, list, np.ndarray],
+        data: np.ndarray,
+        mmap: pd.DataFrame
+    ) -> Dict[str, Any]:
+        """
+        Maps a column from a dataset from one space into another target space.
+        Input:
+            header: description header of input dataset columns.
+            dataset: input dataset.
+            mmap: specified mapping pairs of [`key`, `val`] or [`val`, `key`].
+        Returns:
+            dataset with modified header and mapped column values.
+        """
+        if len(mmap.columns) != 2:
+            raise AssertionError("Invalid map dimensions.")
+        key, val = list(mmap.columns)
+        mmap_key_idx = 0
+        header = np.array(header)
+        if val in header:
+            key, val = val, key
+            mmap_key_idx = -1
+        mmap_np = mmap.to_numpy()
+
+        key_idx = np.where(header == key)[0]
+        for i in range(data.shape[0]):
+            mapping_idx = np.where(
+                np.squeeze(mmap_np[:, mmap_key_idx]) == data[i, key_idx]
+            )[0]
+            if len(mapping_idx) == 0:
+                data[i, key_idx] = np.nan
+                continue
+            mapping_idx = mapping_idx[0]
+            data[i, key_idx] = mmap_np[mapping_idx, mmap_key_idx + 1]
+        data = data[~pd.isna(data).any(axis=1), :]
+        header[key_idx] = val
+        return {
+            "header": header, "data": data
+        }
+
+    def pmbb_accessions_to_dates(self, mmap: Dict[str, Any]) -> None:
+        """
+        Converts PMBB accession numbers to datetime objects based on mmap.
+        Input:
+            mmap: mapping between PMBB accession numbers and datetime objects.
+        Returns:
+            None. Imaging datasets are directly modified (if present).
+        """
+        if self.visc_key in self.dataset.data:
+            self.dataset.data[self.visc_key] = self.map_keys(
+                self.dataset.data[self.visc_key]["header"],
+                self.dataset.data[self.visc_key]["data"],
+                pd.DataFrame(mmap["data"], columns=mmap["header"])
+            )
+        if self.steat_key in self.dataset.data:
+            self.dataset.data[self.steat_key] = self.map_keys(
+                self.dataset.data[self.steat_key]["header"],
+                self.dataset.data[self.steat_key]["data"],
+                pd.DataFrame(mmap["data"], columns=mmap["header"])
+            )
+
+    def import_study_dates(
+        self,
+        fn: Union[Path, str],
+        mmap: Union[Path, str],
+        modality: Optional[str] = None,
+        deidentify: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Imports PMBB accession numbers and associated dates.
+        Input:
+            fn: file with Penn accession numbers and associated dates.
+            mmap: file with mappings between Penn and PMBB accession numbers.
+            modality: optional imaging modality to restrict dataset by.
+            deidentify: optional flag to use deidentified PMBB accession
+                numbers.
+        Returns:
+            A mapping between PMBB accession numbers and imaging dates.
+        """
+        df = pd.read_csv(fn)
+        df.dropna(inplace=True)
+        if modality is not None:
+            df = df[df["STUDY_DESCRIPTION"].str.contains(modality, case=False)]
+        df = df[["PENN_ACCESSION", "STUDY_DATE"]]
+
+        # Map Penn Accession keys to PMBB Accession keys.
+        df = self.map_keys(
+            df.columns,
+            df.to_numpy(),
+            pd.read_csv(mmap, on_bad_lines="skip")
+        )
+        header, data = df["header"], df["data"]
+
+        # Convert dates to datetime objects.
+        dates_idx = np.where(header == "STUDY_DATE")[0][0]
+        for i in range(data.shape[0]):
+            data[i, dates_idx] = datetime.datetime.strptime(
+                str(int(data[i, dates_idx])), "%Y%m%d"
+            )
+
+        # Deidentify accession key values.
+        if deidentify:
+            deidentification_zero_padding = 6
+            accession_idx = np.where(
+                np.array(header) == "PMBB_ACCESSION"
+            )[0][0]
+            for i in range(data.shape[0]):
+                data[i, accession_idx] = int(
+                    float(data[i, accession_idx]) // 10 ** (
+                        deidentification_zero_padding
+                    )
+                ) * int(10 ** deidentification_zero_padding)
+
+        return {
+            "header": header, "data": data
+        }
 
     def __getitem__(self, idx: int) -> ImageSample:
         """
@@ -156,6 +281,11 @@ class ImageDataset(Dataset):
         if len(v_pmbb_id_idxs):
             subq = subq / len(v_pmbb_id_idxs)
             visc = visc / len(v_pmbb_id_idxs)
+        else:
+            # If no data is available for this particular patient, just
+            # substitute with the mean of the data that is actually available.
+            subq = np.mean(visceral_data[:, subq_idx])
+            visc = np.mean(visceral_data[:, visc_idx])
 
         s_pmbb_idx = np.where(steatosis_header == "PMBB_ID")[0][0]
         liver_mean_idx = np.where(steatosis_header == "LIVER_MEAN_HU")[0][0]
@@ -170,6 +300,11 @@ class ImageDataset(Dataset):
         if len(s_pmbb_id_idxs):
             liver_mean = liver_mean / len(s_pmbb_id_idxs)
             spleen_mean = spleen_mean / len(s_pmbb_id_idxs)
+        else:
+            # If no data is available for this particular patient, just
+            # substitute with the mean of the data that is actually available.
+            liver_mean = np.mean(steatosis_data[:, liver_mean_idx])
+            spleen_mean = np.mean(steatosis_data[:, spleen_mean_idx])
 
         a1c_header = self.dataset.a1c["header"]
         a1c_data = self.dataset.a1c["data"]
@@ -183,6 +318,50 @@ class ImageDataset(Dataset):
             a1c_mean += a1c_data[loc, a1c_idx]
         a1c_mean = a1c_mean / len(a1c_pmbb_id_idxs)
 
+        biomarkers = []
+        for k in sorted(self.dataset.data.keys()):
+            k_pmbb_idx = np.where(
+                self.dataset.data[k]["header"] == "PMBB_ID"
+            )[0][0]
+            # Handle BMI data.
+            if "BMI" in self.dataset.data[k]["header"]:
+                ref_key = "BMI"
+            # Handle smoking history data.
+            elif "SOCIAL_HISTORY_USE" in self.dataset.data[k]["header"]:
+                ref_key = "SOCIAL_HISTORY_USE"
+            # Handle age data.
+            elif "AGE_042020" in self.dataset.data[k]["header"]:
+                ref_key = "AGE_042020"
+            else:
+                continue
+            k_data_idx = np.where(
+                self.dataset.data[k]["header"] == ref_key
+            )[0][0]
+            k_pmbb_id_idxs = np.where(
+                np.squeeze(
+                    self.dataset.data[k]["data"][:, k_pmbb_idx]
+                ) == pmbb_id
+            )[0]
+            k_mean = 0.0
+            for loc in k_pmbb_id_idxs:
+                # Handle smoking history separately.
+                if "SOCIAL_HISTORY_USE" in self.dataset.data[k]["header"]:
+                    k_mean += int(
+                        self.dataset.data[k]["data"][
+                            loc, k_data_idx
+                        ].upper() != "NEVER"
+                    )
+                else:
+                    k_mean += self.dataset.data[k]["data"][loc, k_data_idx]
+            if len(k_pmbb_id_idxs):
+                k_mean = k_mean / len(k_pmbb_id_idxs)
+            else:
+                # If not data is avilable for this particular patient, just
+                # substitute with the mean of the data that is actually
+                # available.
+                k_mean = np.mean(self.dataset.data[k]["data"][:, k_data_idx])
+            biomarkers.append(k_mean)
+
         return ImageSample(
-            pmbb_id, subq, visc, liver_mean, spleen_mean, a1c_mean
+            pmbb_id, subq, visc, liver_mean, spleen_mean, biomarkers, a1c_mean
         )

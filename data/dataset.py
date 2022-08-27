@@ -15,7 +15,7 @@ import pandas as pd
 from pathlib import Path
 import pickle
 import re
-from typing import Any, Dict, List, Optional, Set, Union
+from typing import Any, Dict, List, Optional, Sequence, Set, Union
 
 
 class PMBBDataset:
@@ -29,7 +29,7 @@ class PMBBDataset:
         biomarkers: Union[Path, str] = None,
         image1: Union[Path, str] = None,
         image2: Union[Path, str] = None,
-        restrict_to_image_data: bool = True,
+        biomarkers_keys: Sequence[str] = None,
         verbose: bool = False
     ):
         """
@@ -42,7 +42,8 @@ class PMBBDataset:
             biomarkers: file path to the biomarkers dataset.
             image1: file path to the first image dataset.
             image2: file path to the second image dataset.
-            restrict_to_image_data: whether to only import image data.
+            biomarkers_keys: if specified, only the provided biomarker keys
+                will be imported.
             verbose: file path to the verbose dataset.
         """
         self.verbose = verbose
@@ -81,14 +82,39 @@ class PMBBDataset:
         self.t2dm = {}
         self.a1c = {}
 
-        if restrict_to_image_data:
-            self.data = self._image_import()
-            self._biomarkers_import(import_key="a1c")
+        self.data = self._image_import()
+        if (biomarkers_keys is not None and
+                isinstance(biomarkers_keys, (list, str, tuple, set))):
+            imported_a1c = False
+            imported_icd9 = False
+            if isinstance(biomarkers_keys, str):
+                self.data.update(
+                    self._biomarkers_import(import_key=biomarkers_keys)
+                )
+                imported_a1c = biomarkers_keys.lower() == "a1c"
+                imported_icd9 = biomarkers_keys.lower() in [
+                    "icd9", "diagnosis"
+                ]
+            else:
+                for k in biomarkers_keys:
+                    self.data.update(
+                        self._biomarkers_import(import_key=k)
+                    )
+                    if k.lower() == "a1c":
+                        imported_a1c = True
+                    if k.lower() in ["icd9", "diagnosis"]:
+                        imported_icd9 = True
+            if not imported_a1c:
+                self.a1c = self._biomarkers_import(import_key="a1c")
+            if not imported_icd9:
+                self.data.update(
+                    self._biomarkers_import(import_key="diagnosis")
+                )
             assert len(self.a1c)
-            return
-        self.data = self._basic_import()
-        self.data.update(self._biomarkers_import())
-        self.data.update(self._image_import())
+        else:
+            self.data = self._basic_import()
+            self.data.update(self._biomarkers_import())
+            self.data.update(self._image_import())
 
     def save_dataset(self, file_path: str) -> None:
         """
@@ -538,6 +564,65 @@ class PMBBDataset:
             print()
         return data
 
+    def extract_t2dm_from_icd9(self) -> None:
+        """
+        Specifies self.t2dm field from self.data["diagnosis"] data.
+        Input:
+            None.
+        Returns:
+            None.
+        """
+        def is_T2DM(icd9: Union[str, float]) -> int:
+            icd9 = "".join(
+                filter(lambda x: x.isdigit() or x == ".", str(icd9))
+            )
+            # Corresponds to T1DM.
+            if icd9 == "250.01":
+                return int(False)
+            return int(str(icd9).startswith("250"))
+        icd9_header = self.data["diagnosis"]["header"]
+        icd9_data = self.data["diagnosis"]["data"]
+        t2dm_status = defaultdict(set)
+        for pmbb_id, icd9_code, date in icd9_data:
+            if is_T2DM(icd9_code):
+                date = datetime.strptime(date, "%Y-%m-%d")
+                t2dm_status[pmbb_id].add(date)
+        self.t2dm["header"] = np.array([icd9_header[0], icd9_header[-1]])
+        self.t2dm["data"] = t2dm_status
+
+    def generate_dataset_map(
+        self, valid_pmbb_ids: Union[Sequence, set]
+    ) -> Dict[str, list]:
+        dataset_map = {}
+        visc_key = "visceral_image_derived"
+        steat_key = "steatosis_image_derived"
+        MAX_SCORE = int(1e12)
+        for pmbb_id, dates in self.T2DM.items():
+            best_date, min_score = None, MAX_SCORE
+            visc_locs = np.where(
+                self.data[visc_key]["data"]["PMBB_ID"] == pmbb_id
+            )
+            steat_locs = np.where(
+                self.data[steat_key]["data"]["PMBB_ID"] == pmbb_id
+            )
+            for d in dates:
+                date_score = -MAX_SCORE
+                for _key, locs in zip(
+                    [visc_key, steat_key], [visc_locs, steat_locs]
+                ):
+                    score = np.max(
+                        np.abs(
+                            self.data[_key]["data"]["ENC_DATE_SHIFT"][locs] - d
+                        )
+                    )
+                    if score > date_score:
+                        date_score = score
+                if date_score < min_score:
+                    best_date, min_score = d, date_score
+            self.data[_key]["data"]
+
+        return dataset_map
+
     def _biomarkers_import(
         self, import_key: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -641,7 +726,7 @@ class PMBBDataset:
                 continue
             elif "diagnosis" in fn.stem.lower():
                 # Only keeping the first two columns for diagnosis.
-                pass
+                f = f[["PMBB_ID", "CODE", "ENC_DATE_SHIFT"]]
             else:
                 f.drop([
                     "ORDER_NAME",
@@ -656,13 +741,7 @@ class PMBBDataset:
 
             key = fn.stem.lower().split("_")
             key = "_".join(key[1:key.index("deidentified")])
-            if "diagnosis" in fn.stem.lower():
-                # Keep only the first two columns: PMBB_ID and CODE.
-                data[key] = {
-                    "header": np.array(list(f.columns))[:2],
-                    "data": f.to_numpy()[:, :2]
-                }
-            elif "a1c" in fn.stem.lower():
+            if "a1c" in fn.stem.lower():
                 self.a1c = {
                     "header": np.array(list(f.columns)),
                     "data": f.to_numpy()
@@ -749,4 +828,3 @@ class PMBBDataset:
             self.pmbb_ids.update(f.to_numpy()[:, 0].tolist())
 
         return data
-
