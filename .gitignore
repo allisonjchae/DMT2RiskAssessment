@@ -148,3 +148,5 @@ data/*.txt
 data/biomarker_data
 *.pkl
 
+.pt_tmp/
+saved_models/
