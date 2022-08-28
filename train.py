@@ -9,7 +9,7 @@ Licensed under the MIT License. Copyright 2022 University of Pennsylvania.
 """
 import argparse
 from pytorch_tabular import TabularModel
-from pytorch_tabular.models import FTTransformerConfig
+import pytorch_tabular.models as M
 from pytorch_tabular.config import DataConfig, OptimizerConfig, TrainerConfig
 
 from args import Training
@@ -47,15 +47,47 @@ def train(args: argparse.Namespace) -> None:
     trainer_config = TrainerConfig(
         batch_size=args.batch_size,
         max_epochs=args.max_epochs,
-        gpus=args.gpu
+        gpus=args.gpu,
+        early_stopping=None
     )
     optimizer_config = OptimizerConfig(optimizer=args.optimizer)
 
-    model_config = FTTransformerConfig(
-        task="regression",
-        learning_rate=args.lr,
-        target_range=[(4.0, 11.0)]
-    )
+    task = "regression"
+    if args.model == "FTTransformer":
+        model_config = M.FTTransformerConfig(
+            task=task,
+            learning_rate=args.lr,
+            target_range=[args.A1C_range],
+            embedding_dropout=args.dropout,
+            attn_dropout=args.dropout,
+            add_norm_dropout=args.dropout,
+            ff_dropout=args.dropout,
+        )
+    elif args.model == "AutoInt":
+        model_config = M.AutoIntConfig(
+            task=task,
+            learning_rate=args.lr,
+            target_range=[args.A1C_range],
+            embedding_dropout=args.dropout,
+            dropout=args.dropout,
+        )
+    elif args.model == "NODEModel":
+        model_config = M.NodeConfig(
+            task=task,
+            learning_rate=args.lr,
+            target_range=[args.A1C_range],
+            embedding_dropout=args.dropout
+        )
+    elif args.model == "TabNet":
+        model_config = M.TabNetModelConfig(
+            task=task,
+            learning_rate=args.lr,
+            target_range=[args.A1C_range],
+        )
+    else:
+        raise NotImplementedError(
+            f"Unrecognized model {args.model} specified."
+        )
 
     tabular_model = TabularModel(
         data_config=data_config,
@@ -65,7 +97,6 @@ def train(args: argparse.Namespace) -> None:
     )
 
     tabular_model.fit(train=train, validation=val)
-    tabular_model.save_model("./")
 
 
 if __name__ == "__main__":

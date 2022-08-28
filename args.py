@@ -30,6 +30,13 @@ class Training:
             help="Optional cache path for faster load times."
         )
         parser.add_argument(
+            "--model",
+            type=str,
+            choices=("FTTransformer", "AutoInt", "NODEModel", "TabNet"),
+            required=True,
+            help="Tabular model specification."
+        )
+        parser.add_argument(
             "--verbose",
             action="store_true",
             help="Optional flag for verbose messages to stdout."
@@ -110,6 +117,19 @@ class Training:
             "--use_idp",
             action="store_true",
             help="Use image derived phenotype (IDP) features as model input."
+        )
+        parser.add_argument(
+            "--dropout",
+            type=float,
+            default=0.0,
+            help="Dropout probability."
+        )
+        parser.add_argument(
+            "--A1C_range",
+            type=float,
+            nargs=2,
+            default=(3.0, 15.0),
+            help="Range of possible A1C percentages. Default 3.0% to 15.0%."
         )
 
         return parser.parse_args()

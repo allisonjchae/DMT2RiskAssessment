@@ -150,3 +150,4 @@ data/biomarker_data
 
 .pt_tmp/
 saved_models/
+pt_tabular_models/
