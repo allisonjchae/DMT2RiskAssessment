@@ -8,16 +8,33 @@ Author(s):
 Licensed under the MIT License. Copyright 2022 University of Pennsylvania.
 """
 import argparse
+import numpy as np
+import os
 from pytorch_tabular import TabularModel
 import pytorch_tabular.models as M
 from pytorch_tabular.config import DataConfig, OptimizerConfig, TrainerConfig
+import random
+import torch
 
 from args import Training
 from data.PMBB import PMBBDataset
 from data.accession import AccessionConverter
 
 
+def seed_everything(seed: int, use_deterministic: bool = True) -> None:
+    torch.use_deterministic_algorithms(use_deterministic)
+    random.seed(seed)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = use_deterministic
+
+
 def train(args: argparse.Namespace) -> None:
+    seed_everything(args.seed, use_deterministic=True)
+
     converter = AccessionConverter(
         pmbb_to_penn_fn=args.pmbb_to_penn_fn,
         penn_to_date_fn=args.penn_to_date_fn
@@ -62,6 +79,7 @@ def train(args: argparse.Namespace) -> None:
             attn_dropout=args.dropout,
             add_norm_dropout=args.dropout,
             ff_dropout=args.dropout,
+            seed=args.seed
         )
     elif args.model == "AutoInt":
         model_config = M.AutoIntConfig(
@@ -70,19 +88,22 @@ def train(args: argparse.Namespace) -> None:
             target_range=[args.A1C_range],
             embedding_dropout=args.dropout,
             dropout=args.dropout,
+            seed=args.seed
         )
     elif args.model == "NODEModel":
         model_config = M.NodeConfig(
             task=task,
             learning_rate=args.lr,
             target_range=[args.A1C_range],
-            embedding_dropout=args.dropout
+            embedding_dropout=args.dropout,
+            seed=args.seed
         )
     elif args.model == "TabNet":
         model_config = M.TabNetModelConfig(
             task=task,
             learning_rate=args.lr,
             target_range=[args.A1C_range],
+            seed=args.seed
         )
     else:
         raise NotImplementedError(

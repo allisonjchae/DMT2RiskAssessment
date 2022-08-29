@@ -129,7 +129,7 @@ class Training:
             type=float,
             nargs=2,
             default=(3.0, 15.0),
-            help="Range of possible A1C percentages. Default 3.0% to 15.0%."
+            help="Range of possible A1C values. Default 3.0 to 15.0 percent."
         )
 
         return parser.parse_args()
