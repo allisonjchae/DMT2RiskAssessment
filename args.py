@@ -32,7 +32,15 @@ class Training:
         parser.add_argument(
             "--model",
             type=str,
-            choices=("FTTransformer", "AutoInt", "NODEModel", "TabNet"),
+            choices=(
+                "FTTransformer",
+                "AutoInt",
+                "NODEModel",
+                "TabNet",
+                "XGBoost",
+                "OLS",
+                "WRC",
+            ),
             required=True,
             help="Tabular model specification."
         )
@@ -76,6 +84,18 @@ class Training:
             type=float,
             default=0.001,
             help="Learning rate. Default 0.001."
+        )
+        parser.add_argument(
+            "--lr_step_size",
+            type=int,
+            default=25,
+            help="Learning rate step size. Default 25."
+        )
+        parser.add_argument(
+            "--lr_gamma",
+            type=float,
+            default=0.5,
+            help="Learning rate decay factor. Default 0.5."
         )
         parser.add_argument(
             "--partitions",
@@ -130,6 +150,57 @@ class Training:
             nargs=2,
             default=(3.0, 15.0),
             help="Range of possible A1C values. Default 3.0 to 15.0 percent."
+        )
+        parser.add_argument(
+            "--intelligent",
+            action="store_true",
+            help="Use intelligently derived clinical variables."
+        )
+        parser.add_argument(
+            "--classifier",
+            action="store_true",
+            help="Train a binary classifier instead of an SynthA1c predictor."
+        )
+        parser.add_argument(
+            "--A1C_threshmin",
+            type=float,
+            choices=(5.7, 6.5),
+            default=6.5,
+            help="A1C threshold for classification."
+        )
+
+        return parser.parse_args()
+
+
+class Inference:
+    def build_args() -> argparse.Namespace:
+        parser = argparse.ArgumentParser(
+            description="DMT2 risk prediction model inference."
+        )
+
+        parser.add_argument(
+            "--datapath",
+            type=str,
+            required=True,
+            help="Path to pickled dataframe to run inference on."
+        )
+        parser.add_argument(
+            "--model_dir",
+            type=str,
+            required=True,
+            help="Path to model files for inference."
+        )
+        parser.add_argument(
+            "--savepath",
+            type=str,
+            required=True,
+            help="Filepath to save inference results to."
+        )
+        parser.add_argument(
+            "--seed",
+            type=int,
+            default=42,
+            help="Optional random seed. Default 42."
         )
 
         return parser.parse_args()

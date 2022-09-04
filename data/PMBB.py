@@ -488,7 +488,9 @@ class PMBBDataset(torch.utils.data.Dataset):
 
     @staticmethod
     def get_num_col_names(
-        use_clinical: bool = True, use_idp: bool = True
+        use_clinical: bool = True,
+        use_idp: bool = True,
+        use_intelligent: bool = False
     ) -> Sequence[str]:
         """
         Retrieves the column names of continuous data fields in the dataset.
@@ -496,18 +498,24 @@ class PMBBDataset(torch.utils.data.Dataset):
             use_clinical: whether to include clinical data names.
             use_idp: whether to include image-derived phenotype (IDP) data
                 names.
+            use_intelligent: whether to use intelligently derived clinical
+                variables and IDPs.
         Returns:
             Column names of the appropriate continuous data fields.
         """
         clinical_features = [
             "AGE", "BP_SYSTOLIC", "BP_DIASTOLIC", "WEIGHT_LBS", "HEIGHT_INCHES"
         ]
+        if use_intelligent:
+            clinical_features = clinical_features[:-2] + ["BMI"]
         idp_features = [
             "LIVER_MEAN_HU",
             "SPLEEN_MEAN_HU",
             "VISCERAL_METRIC_AREA_MEAN",
             "SUBQ_METRIC_AREA_MEAN"
         ]
+        if use_intelligent:
+            idp_features = idp_features[2:] + ["HEPATIC_FAT"]
         features = []
         if use_clinical:
             features += clinical_features
@@ -517,7 +525,9 @@ class PMBBDataset(torch.utils.data.Dataset):
 
     @staticmethod
     def get_cat_col_names(
-        use_clinical: bool = True, use_idp: bool = True
+        use_clinical: bool = True,
+        use_idp: bool = True,
+        use_intelligent: bool = False
     ) -> Sequence[str]:
         """
         Retrieves the column names of categorical data fields in the dataset.
@@ -525,6 +535,8 @@ class PMBBDataset(torch.utils.data.Dataset):
             use_clinical: whether to include clinical data names.
             use_idp: whether to include image-derived phenotype (IDP) data
                 names.
+            use_intelligent: whether to use intelligently derived clinical
+                variables and IDPs.
         Returns:
             Column names of the appropriate categorical data fields.
         """
