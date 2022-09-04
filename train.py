@@ -28,6 +28,14 @@ from data.accession import AccessionConverter
 
 
 def seed_everything(seed: int, use_deterministic: bool = True) -> None:
+    """
+    Random state initialization function. Should be called before training.
+    Input:
+        seed: random seed.
+        use_deterministic: whether to only use deterministic algorithms.
+    Returns:
+        None.
+    """
     torch.use_deterministic_algorithms(use_deterministic)
     random.seed(seed)
     torch.manual_seed(seed)
@@ -36,6 +44,40 @@ def seed_everything(seed: int, use_deterministic: bool = True) -> None:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.deterministic = use_deterministic
+
+
+def F_score(
+    preds: torch.Tensor,
+    label: torch.Tensor,
+    threshold: float = 0.5,
+    beta: int = 2
+) -> torch.Tensor:
+    """
+    Returns the F_beta score associated with a classification task.
+    Input:
+        preds: model outputs.
+        label: ground truth.
+        threshold: threshold value.
+        beta: defines relative weighting between precision and recall.
+    Returns:
+        The F_beta score.
+    """
+    prob = torch.squeeze(preds[:, 1]) > threshold
+    label = torch.squeeze(label) > threshold
+
+    TP = torch.sum(prob & label)
+    TN = torch.sum((~prob) & (~label))
+    _ = TN  # Ignore TN.
+    FP = torch.sum((prob & (~label)))
+    FN = torch.sum(((~prob) & label))
+
+    eps = torch.finfo(torch.float64).eps
+    precision = TP / (TP + FP + eps)
+    recall = TP / (TP + FN + eps)
+    F2 = (1 + (beta * beta)) * precision * recall / (
+        ((beta * beta) * precision) + recall + eps
+    )
+    return torch.mean(F2, dim=0)
 
 
 def train(args: argparse.Namespace) -> Any:
@@ -105,6 +147,10 @@ def train(args: argparse.Namespace) -> Any:
                 axis=1,
                 inplace=True
             )
+    if args.classifier:
+        train.RESULT_VALUE_NUM = train.RESULT_VALUE_NUM >= args.A1C_threshmin
+        val.RESULT_VALUE_NUM = val.RESULT_VALUE_NUM >= args.A1C_threshmin
+        test.RESULT_VALUE_NUM = test.RESULT_VALUE_NUM >= args.A1C_threshmin
 
     # Weighted random classifier.
     if args.model == "WRC":
@@ -112,15 +158,13 @@ def train(args: argparse.Namespace) -> Any:
             err_msg = "Weighted random classifier only implemented for "
             err_msg += "classification task."
             raise NotImplementedError(err_msg)
-        a1c_binary = (train.RESULT_VALUE_NUM >= args.A1C_threshmin).astype(int)
+        a1c_binary = (train.RESULT_VALUE_NUM).astype(int)
         a1c_prop = np.sum(a1c_binary) / a1c_binary.shape[0]
         preds = []
         for _ in test.RESULT_VALUE_NUM:
             preds.append(int(random.random() <= a1c_prop))
         f2 = fbeta_score(
-            (val.RESULT_VALUE_NUM >= args.A1C_threshmin).astype(int),
-            preds,
-            beta=2
+            (val.RESULT_VALUE_NUM).astype(int), preds, beta=2
         )
         print(f"F2 Score: {f2:.6f}")
         return a1c_prop
@@ -209,7 +253,7 @@ def train(args: argparse.Namespace) -> Any:
                 ["RESULT_VALUE_NUM", "RESULT_DATE_SHIFT"],
                 axis=1
             ),
-            (train.RESULT_VALUE_NUM >= args.A1C_threshmin).astype(int)
+            (train.RESULT_VALUE_NUM).astype(int)
         )
 
         # Specify categorical variable types.
@@ -220,7 +264,7 @@ def train(args: argparse.Namespace) -> Any:
         )
         if args.classifier:
             f2 = fbeta_score(
-                (val.RESULT_VALUE_NUM >= args.A1C_threshmin).astype(int),
+                (val.RESULT_VALUE_NUM).astype(int),
                 preds,
                 beta=2
             )
@@ -302,10 +346,10 @@ def train(args: argparse.Namespace) -> Any:
         data_config=data_config,
         model_config=model_config,
         optimizer_config=optimizer_config,
-        trainer_config=trainer_config
+        trainer_config=trainer_config,
     )
 
-    tabular_model.fit(train=train, validation=val)
+    tabular_model.fit(train=train, validation=val, metrics=[F_score])
     return tabular_model
 
 
