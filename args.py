@@ -37,6 +37,7 @@ class Training:
                 "AutoInt",
                 "NODEModel",
                 "TabNet",
+                "FCNN",
                 "XGBoost",
                 "OLS",
                 "WRC",
@@ -201,6 +202,23 @@ class Inference:
             type=int,
             default=42,
             help="Optional random seed. Default 42."
+        )
+        parser.add_argument(
+            "--classifier",
+            action="store_true",
+            help="Specify binary classifier model."
+        )
+        parser.add_argument(
+            "--A1C_threshmin",
+            type=float,
+            choices=(5.7, 6.5),
+            default=6.5,
+            help="A1C threshold for classification tasks."
+        )
+        parser.add_argument(
+            "--intelligent",
+            action="store_true",
+            help="Use intelligently derived clinical variables."
         )
 
         return parser.parse_args()

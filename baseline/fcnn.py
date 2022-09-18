@@ -1,5 +1,5 @@
 """
-Basic multilayer perceptron (MLP).
+Baseline Fully Connected Neural Network (FCNN) implementation.
 
 Author(s):
     Allison Chae
@@ -12,7 +12,7 @@ import torch
 from torch import nn
 
 
-class MLP(nn.Module):
+class FCNN(nn.Module):
     def __init__(
         self,
         in_chans: int,
@@ -73,6 +73,6 @@ class MLP(nn.Module):
         Input:
             x: input feature tensor with a size of in_chans.
         Return:
-            MLP(x).
+            FCNN(x).
         """
         return self.layers(x)

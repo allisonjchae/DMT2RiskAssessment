@@ -14,7 +14,7 @@ import os
 import pandas as pd
 from pathlib import Path
 import pickle
-import time
+import pytorch_lightning as pl
 import torch
 from typing import Any, Dict, NamedTuple, Optional, Sequence, Tuple, Union
 
@@ -23,8 +23,98 @@ from data.accession import AccessionConverter
 
 class PMBBSample(NamedTuple):
     PMBB_ID: str
-    data: Dict[str, Any]
+    data: Union[Dict[str, Any], torch.Tensor]
     daterange: int
+
+
+class PMBBDataModule(pl.LightningDataModule):
+    def __init__(
+        self,
+        data_dir: Union[Path, str],
+        batch_size: int = 16,
+        seed: int = 42
+    ):
+        """
+        Args:
+            data_dir: data directory with training, validation, and test
+                datasets.
+            batch_size: batch size. Default 16.
+            seed: random seed. Default 42.
+        """
+        super().__init__()
+        self.data_dir = data_dir
+        self.batch_size = batch_size
+        self.seed = seed
+        with open(os.path.join(data_dir, "train_dataset.pkl"), "rb") as train:
+            self.train_tabular = pickle.load(train)
+        with open(os.path.join(data_dir, "val_dataset.pkl"), "rb") as val:
+            self.val_tabular = pickle.load(val)
+        with open(os.path.join(data_dir, "test_dataset.pkl"), "rb") as test:
+            self.test_tabular = pickle.load(test)
+
+    def train_dataloader(self):
+        train_dataset = self.DatasetFromTabular(self.train_tabular, self.seed)
+        return torch.utils.data.DataLoader(
+            train_dataset, batch_size=self.batch_size
+        )
+
+    def val_dataloader(self):
+        val_dataset = self.DatasetFromTabular(self.val_tabular, self.seed)
+        return torch.utils.data.DataLoader(
+            val_dataset, batch_size=self.batch_size
+        )
+
+    def test_dataloader(self):
+        test_dataset = self.DatasetFromTabular(self.test_tabular, self.seed)
+        return torch.utils.data.DataLoader(
+            test_dataset, batch_size=self.batch_size
+        )
+
+    def num_features(self):
+        return len(self.train_dataloader().dataset[0].data) - 1
+
+    class DatasetFromTabular(torch.utils.data.Dataset):
+        def __init__(self, df: pd.DataFrame, seed: int = 42):
+            super().__init__()
+            self.df = df
+            self.rng = np.random.RandomState(seed)
+            self.idxs = np.arange(0, len(self))
+            self.rng.shuffle(self.idxs)
+
+        def __len__(self):
+            return self.df.shape[0]
+
+        def __getitem__(self, idx: int) -> pd.Series:
+            item = self.df.iloc[self.idxs[idx]]
+            features = [
+                int(item["RACE_CODE"] == "WHITE"),
+                int(item["RACE_CODE"] == "BLACK"),
+                int(item["RACE_CODE"] == "ASIAN"),
+                int(item["RACE_CODE"] == "AM IND AK NATIVE"),
+                int(item["RACE_CODE"] == "HI PAC ISLAND"),
+                int(
+                    "OTHER" in item["RACE_CODE"].upper() or
+                    "UNKNOWN" in item["RACE_CODE"].upper()
+                ),
+                int(item["Sex"].title() == "Female"),
+                float(item["AGE"]),
+                item["BP_SYSTOLIC"],
+                item["BP_DIASTOLIC"],
+                item["HEIGHT_INCHES"],
+                item["WEIGHT_LBS"],
+                item["LIVER_MEAN_HU"],
+                item["SPLEEN_MEAN_HU"],
+                item["VISCERAL_METRIC_AREA_MEAN"],
+                item["SUBQ_METRIC_AREA_MEAN"],
+                item["RESULT_VALUE_NUM"]
+            ]
+            dummy_pmbb_id = item.name
+            dummy_date_range = -1
+            return PMBBSample(
+                dummy_pmbb_id,
+                torch.tensor(features),
+                dummy_date_range
+            )
 
 
 class PMBBDataset(torch.utils.data.Dataset):
@@ -35,7 +125,7 @@ class PMBBDataset(torch.utils.data.Dataset):
         cache_path: Optional[Union[Path, str]] = None,
         verbose: bool = True,
         identifier: str = "A1C",
-        seed: int = int(time.time())
+        seed: int = 42
     ):
         """
         Args:

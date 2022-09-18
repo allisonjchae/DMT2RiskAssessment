@@ -12,72 +12,21 @@ import numpy as np
 import os
 import pandas as pd
 import pickle
+import pytorch_lightning as pl
 from pytorch_tabular import TabularModel
 import pytorch_tabular.models as M
 from pytorch_tabular.config import DataConfig, OptimizerConfig, TrainerConfig
 import random
-from sklearn.metrics import fbeta_score
+from sklearn.metrics import accuracy_score
 from statsmodels.regression.linear_model import OLS
-import torch
 from typing import Any
 import xgboost as xgb
 
 from args import Training
-from data.PMBB import PMBBDataset
+from data.PMBB import PMBBDataset, PMBBDataModule
 from data.accession import AccessionConverter
-
-
-def seed_everything(seed: int, use_deterministic: bool = True) -> None:
-    """
-    Random state initialization function. Should be called before training.
-    Input:
-        seed: random seed.
-        use_deterministic: whether to only use deterministic algorithms.
-    Returns:
-        None.
-    """
-    torch.use_deterministic_algorithms(use_deterministic)
-    random.seed(seed)
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.deterministic = use_deterministic
-
-
-def F_score(
-    preds: torch.Tensor,
-    label: torch.Tensor,
-    threshold: float = 0.5,
-    beta: int = 2
-) -> torch.Tensor:
-    """
-    Returns the F_beta score associated with a classification task.
-    Input:
-        preds: model outputs.
-        label: ground truth.
-        threshold: threshold value.
-        beta: defines relative weighting between precision and recall.
-    Returns:
-        The F_beta score.
-    """
-    prob = torch.squeeze(preds[:, 1]) > threshold
-    label = torch.squeeze(label) > threshold
-
-    TP = torch.sum(prob & label)
-    TN = torch.sum((~prob) & (~label))
-    _ = TN  # Ignore TN.
-    FP = torch.sum((prob & (~label)))
-    FN = torch.sum(((~prob) & label))
-
-    eps = torch.finfo(torch.float64).eps
-    precision = TP / (TP + FP + eps)
-    recall = TP / (TP + FN + eps)
-    F2 = (1 + (beta * beta)) * precision * recall / (
-        ((beta * beta) * precision) + recall + eps
-    )
-    return torch.mean(F2, dim=0)
+from baseline.pl_module import FCNNModule
+from utils import seed_everything
 
 
 def train(args: argparse.Namespace) -> Any:
@@ -152,7 +101,7 @@ def train(args: argparse.Namespace) -> Any:
         val.RESULT_VALUE_NUM = val.RESULT_VALUE_NUM >= args.A1C_threshmin
         test.RESULT_VALUE_NUM = test.RESULT_VALUE_NUM >= args.A1C_threshmin
 
-    # Weighted random classifier.
+    # Weighted random classifier (classification only).
     if args.model == "WRC":
         if not args.classifier:
             err_msg = "Weighted random classifier only implemented for "
@@ -163,11 +112,10 @@ def train(args: argparse.Namespace) -> Any:
         preds = []
         for _ in test.RESULT_VALUE_NUM:
             preds.append(int(random.random() <= a1c_prop))
-        f2 = fbeta_score(
-            (val.RESULT_VALUE_NUM).astype(int), preds, beta=2
-        )
-        print(f"F2 Score: {f2:.6f}")
+        accuracy = accuracy_score((val.RESULT_VALUE_NUM).astype(int), preds)
+        print(f"Accuracy: {accuracy:.6f}")
         return a1c_prop
+    # Ordinary least squares (regression only).
     elif args.model == "OLS":
         if args.classifier:
             raise NotImplementedError(
@@ -213,14 +161,15 @@ def train(args: argparse.Namespace) -> Any:
         print(f"Validation RMSE Loss: {rmse:.6f}")
         print(f"PCC: {np.corrcoef(val.RESULT_VALUE_NUM, preds)[0, 1]:.6f}")
         return ols_model
-    if args.model == "XGBoost":
+    # Gradient-boosted decision tree.
+    elif args.model == "XGBoost":
         tree_method = "gpu_hist" if args.gpu is not None else "hist"
         if not args.classifier:
             xgb_model = xgb.XGBRegressor(
                 objective="reg:squarederror",
                 tree_method=tree_method,
                 max_depth=8,
-                subsample=0.85,
+                subsample=1,
                 reg_alpha=1,
                 reg_lambda=4,
                 seed=args.seed,
@@ -240,10 +189,10 @@ def train(args: argparse.Namespace) -> Any:
                 reg_lambda=4,
                 seed=args.seed,
                 random_state=args.seed,
-                learning_rate=0.3,
-                # learning_rate=args.lr,
+                learning_rate=args.lr,
                 gpu_id=args.gpu,
-                enable_categorical=True
+                n_estimators=32,
+                enable_categorical=True,
             )
         # Specify categorical variable types.
         train["RACE_CODE"] = train["RACE_CODE"].astype("category")
@@ -253,27 +202,60 @@ def train(args: argparse.Namespace) -> Any:
                 ["RESULT_VALUE_NUM", "RESULT_DATE_SHIFT"],
                 axis=1
             ),
-            (train.RESULT_VALUE_NUM).astype(int)
+            train.RESULT_VALUE_NUM
         )
 
         # Specify categorical variable types.
         val["RACE_CODE"] = val["RACE_CODE"].astype("category")
         val["Sex"] = val["Sex"].astype("category")
         preds = xgb_model.predict(
-            val.drop(["RESULT_VALUE_NUM", "RESULT_DATE_SHIFT"], axis=1)
+            val.drop(["RESULT_VALUE_NUM", "RESULT_DATE_SHIFT"], axis=1),
+            output_margin=args.classifier
         )
         if args.classifier:
-            f2 = fbeta_score(
-                (val.RESULT_VALUE_NUM).astype(int),
-                preds,
-                beta=2
-            )
-            print(f"F2 Score: {f2:.6f}")
+            # Apply sigmoid activation.
+            preds = 1.0 / (1.0 + np.exp(-1.0 * np.array(preds)))
+            num_threshs = 1000.0
+            thresholds = np.array(list(range(int(num_threshs)))) / num_threshs
+            scores = []
+            for thresh in thresholds:
+                scores.append(accuracy_score(
+                    (val.RESULT_VALUE_NUM).astype(int), preds >= thresh,
+                ))
+            # Binarize predictions.
+            preds = preds >= thresholds[np.argmax(np.array(scores))]
+            acc = accuracy_score((val.RESULT_VALUE_NUM).astype(int), preds)
+            print(f"Accuracy: {acc:.6f}")
         else:
             rmse = np.sqrt(np.mean(np.square(val.RESULT_VALUE_NUM - preds)))
             print(f"Validation RMSE Loss: {rmse:.6f}")
             print(f"PCC: {np.corrcoef(val.RESULT_VALUE_NUM, preds)[0, 1]:.6f}")
         return xgb_model
+    elif args.model == "FCNN":
+        data_module = PMBBDataModule(
+            data_dir=os.path.join("./data", f"seed_{args.seed}"),
+            batch_size=args.batch_size,
+            seed=args.seed
+        )
+        tabular_model = FCNNModule(
+            in_chans=data_module.num_features(),
+            out_chans=1,
+            chans=32,
+            num_layers=8,
+            activation="ReLU",
+            task="classification",
+            A1C_threshmin=args.A1C_threshmin,
+            lr=args.lr,
+            lr_step_size=args.lr_step_size,
+            lr_gamma=args.lr_gamma
+        )
+        trainer = pl.Trainer(
+            max_epochs=args.max_epochs,
+            auto_select_gpus=True
+        )
+        trainer.fit(model=tabular_model, datamodule=data_module)
+        trainer.test(model=tabular_model, datamodule=data_module)
+        return tabular_model
 
     data_config = DataConfig(
         target=PMBBDataset.get_target_col_name(),
@@ -349,7 +331,7 @@ def train(args: argparse.Namespace) -> Any:
         trainer_config=trainer_config,
     )
 
-    tabular_model.fit(train=train, validation=val, metrics=[F_score])
+    tabular_model.fit(train=train, validation=val)
     return tabular_model
 
 
