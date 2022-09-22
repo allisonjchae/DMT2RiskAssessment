@@ -41,9 +41,9 @@ Questions and comments are welcome. Suggests can be submitted through Github iss
       title={Learning-Based Radiomic Prediction of {Type 2 Diabetes Mellitus} Using Image-Derived Phenotypes},
       authors={Yao, Michael S and Chae, Allison and MacLean, Matthew T and Verma, Anurag and Duda, Jeffrey and Gee, James and Torigian, Drew A and Rader, Daniel and Khan, Charles and Witschey, Walter R and Sagreiya, Hersh},
       year={2022},
-      eprint={},
+      eprint={2209.10043},
       archivePrefix={arXiv},
-      primaryClass={},
+      primaryClass={cs.LG},
     }
 
 ## License
