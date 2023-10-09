@@ -1,10 +1,10 @@
-# Learning-Based Radiomic Prediction of Type 2 Diabetes Mellitus Using Image-Derived Phenotypes
+# [SynthA1c: Towards Clinically Interpretable Patient Representations for Diabetes Risk Stratification](https://link.springer.com/chapter/10.1007/978-3-031-46005-0_5)
 
 [![LICENSE](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE.md)
 [![CONTACT](https://img.shields.io/badge/contact-michael.yao%40pennmedicine.upenn.edu-blue)](mailto:michael.yao@pennmedicine.upenn.edu)
 [![CONTACT](https://img.shields.io/badge/contact-jisoo.chae%40pennmedicine.upenn.edu-blue)](mailto:jisoo.chae@pennmedicine.upenn.edu)
 
-Early diagnosis of Type 2 Diabetes Mellitus is crucial to enable timely therapeutic interventions and lifestyle modifications. As medical imaging data becomes more widely available for many patient populations, we sought to investigate whether image-derived phenotypic data could be leveraged in tabular learning classifier models to predict T2DM incidence without the use of any invasive blood lab measurements. We show that both neural network and decision tree models that use image-derived phenotypes can predict patient T2DM status with recall scores as high as 87.6%. We also propose the novel use of these same architectures as 'SynthA1c encoders,' that are able to output interpretable values mimicking HbA1c blood sugar empirical lab measurements. Finally, we demonstrate that T2DM risk prediction model sensitivity to small perturbations in input feature vector components can be used to predict predictive performance on covariates sampled from previously unseen patient populations.
+Early diagnosis of Type 2 Diabetes Mellitus (T2DM) is crucial to enable timely therapeutic interventions and lifestyle modifications. As the time available for clinical office visits shortens and medical imaging data become more widely available, patient image data could be used to opportunistically identify patients for additional T2DM diagnostic workup by physicians. We investigated whether image-derived phenotypic data could be leveraged in tabular learning classifier models to predict T2DM risk in an automated fashion to flag high-risk patients without the need for additional blood laboratory measurements. In contrast to traditional binary classifiers, we leverage neural networks and decision tree models to represent patient data as 'SynthA1c' latent variables, which mimic blood hemoglobin A1c empirical lab measurements, that achieve sensitivities as high as 87.6%. To evaluate how SynthA1c models may generalize to other patient populations, we introduce a novel generalizable metric that uses vanilla data augmentation techniques to predict model performance on input out-of-domain covariates. We show that image-derived phenotypes and physical examination data together can accurately predict diabetes risk as a means of opportunistic risk stratification enabled by artificial intelligence and medical imaging.
 
 ## Installation
 
@@ -37,13 +37,17 @@ Questions and comments are welcome. Suggests can be submitted through Github iss
 
 ## Citation
 
-    @misc{yaochae2022dmt2,
-      title={Learning-Based Radiomic Prediction of {Type 2 Diabetes Mellitus} Using Image-Derived Phenotypes},
+    @inproceedings{yaochae2023syntha1c,
+      title={SynthA1c: Towards Clinically Interpretable Patient Representations for Diabetes Risk Stratification},
       authors={Yao, Michael S and Chae, Allison and MacLean, Matthew T and Verma, Anurag and Duda, Jeffrey and Gee, James and Torigian, Drew A and Rader, Daniel and Khan, Charles and Witschey, Walter R and Sagreiya, Hersh},
-      year={2022},
-      eprint={2209.10043},
-      archivePrefix={arXiv},
-      primaryClass={cs.LG},
+      year={2023},
+      pages={46-57},
+      volume={14277},
+      doi={10.1007/978-3-031-46005-0_5},
+      url={https://link.springer.com/chapter/10.1007/978-3-031-46005-0_5},
+      booktitle={Predictive Intelligence in Medicine},
+      publisher={Springer},
+      venue={Vancouver, Canada},
     }
 
 ## License
